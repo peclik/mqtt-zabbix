@@ -1,4 +1,15 @@
-/bishopbriggs/gordonhouse/electricity/watts,mqtt.house.watts::hostname
-/bishopbriggs/gordonhouse/kitchen/temperature,mqtt.kitchen.temperature::hostname
-/bishopbriggs/gordonhouse/kitchen/freezer/temperature,mqtt.freezer.temperature::hostname
-/bishopbriggs/gordonhouse/kitchen/fridge/temperature,mqtt.fridge.temperature::hostname
+#         MQTT topic             | zbx host|  zbx discovery_key/disc_data or 'x'    |      zbx value key          | type[:jsonPath(first match is used)]
+# ESP Easy
+house/ha-temp/roof1/Temperature  | house   | temp.discovery/{"{#PLACE}":"roof1"}    | sensor[roof1,temperature]   | float
+house/ha-temp/garage/Temperature | house   | temp.discovery/{"{#PLACE}":"garage"}   | sensor[garage,temperature]  | float
+house/ha-temp/rack/Temperature   | house   | temp.discovery/{"{#PLACE}":"rack"}     | sensor[rack,temperature]    | float
+house/boiler/boiler_data         | house   | temp.discovery/{"{#PLACE}":"outdoor"}  | sensor[outdoor,temperature] | float:$.outdoorTemp
+
+# EMS-ESP
+house/boiler/boiler_data         | boiler  | x                                      | boiler_data                 | string
+house/boiler/thermostat_data1    | boiler  | x                                      | thermostat_data             | string
+
+# Sonoff POW/Tasmota energy meter
+house/vzt/pow/tele/STATE         | vzt     | relay.discovery/{"{#PLACE}":"vzt"}     | sensor[vzt,relay]     | onoff:$.POWER
+house/vzt/pow/tele/SENSOR        | vzt     | power.discovery/{"{#PLACE}":"vzt"}     | sensor[vzt,power]     | float:$.ENERGY.Power
+house/vzt/pow/tele/SENSOR        | vzt     | power.discovery/{"{#PLACE}":"vzt"}     | sensor[vzt,energy]    | float:$.ENERGY.Total

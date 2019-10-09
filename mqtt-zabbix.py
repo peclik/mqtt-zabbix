@@ -1,27 +1,35 @@
-#!/usr/bin/env python
+#!/usr/bin/python3
 # -*- coding: iso-8859-1 -*-
 
-__author__ = "Kyle Gordon"
-__copyright__ = "Copyright (C) Kyle Gordon"
+__author__ = "Kyle Gordon, Richard Pecl"
+__copyright__ = "Copyright (C) Kyle Gordon, Richard Pecl"
 
 import os
+import time
 import logging
+import traceback
 import signal
 import socket
 import time
 import sys
 import csv
+import json
+import configparser
+import jsonpath_rw as jspath
 
 import paho.mqtt.client as mqtt
-import ConfigParser
+
+from systemd import daemon
 
 from datetime import datetime, timedelta
 
-from zbxsend import Metric, send_to_zabbix
+from pyzabbix import ZabbixMetric, ZabbixSender
+
+CONF_DIR="/root/mqtt-zabbix"
 
 # Read the config file
-config = ConfigParser.RawConfigParser()
-config.read("/etc/mqtt-zabbix/mqtt-zabbix.cfg")
+config = configparser.RawConfigParser()
+config.read(CONF_DIR + "/mqtt-zabbix.cfg")
 
 # Use ConfigParser to pick out the settings
 DEBUG = config.getboolean("global", "debug")
@@ -29,11 +37,14 @@ LOGFILE = config.get("global", "logfile")
 MQTT_HOST = config.get("global", "mqtt_host")
 MQTT_PORT = config.getint("global", "mqtt_port")
 MQTT_TOPIC = config.get("global", "mqtt_topic")
+MQTT_USER = config.get("global", "mqtt_user")
+MQTT_PASSWD = config.get("global", "mqtt_passwd")
 
 KEYFILE = config.get("global", "keyfile")
-KEYHOST = config.get("global", "keyhost")
 ZBXSERVER = config.get("global", "zabbix_server")
 ZBXPORT = config.getint("global", "zabbix_port")
+
+DISCOVERY_PERIOD = config.getint("global", "discovery_period")
 
 APPNAME = "mqtt-zabbix"
 PRESENCETOPIC = "clients/" + socket.getfqdn() + "/" + APPNAME + "/state"
@@ -54,6 +65,11 @@ else:
 logging.info("Starting " + APPNAME)
 logging.info("INFO MODE")
 logging.debug("DEBUG MODE")
+
+lastDiscovery = time.time() - DISCOVERY_PERIOD
+
+zabbix = ZabbixSender(ZBXSERVER)
+
 
 # All the MQTT callbacks start here
 
@@ -138,8 +154,8 @@ def on_message(mosq, obj, msg):
     """
     What to do when the client recieves a message from the broker
     """
-    logging.debug("Received: " + msg.payload +
-                  " received on topic " + msg.topic +
+    logging.debug("Received: " + str(msg.payload) +
+                  " received on topic " + str(msg.topic) +
                   " with QoS " + str(msg.qos))
     process_message(msg)
 
@@ -164,36 +180,77 @@ def process_connection():
 def process_message(msg):
     """
     What to do with the message that's arrived.
-    Looks up the topic in the KeyMap dictionary, and forwards
+    Looks up the topic in the TopicMap dictionary, and forwards
     the message onto Zabbix using the associated Zabbix key
     """
+
+    # send discovery from time to time (in case items are deleted on zabbix server)
+    global lastDiscovery
+    actTime = time.time()
+    if (actTime - lastDiscovery) > DISCOVERY_PERIOD:
+        topicMap.send_discovery()
+        lastDiscovery = actTime
+
+    metrics = []
+
     logging.debug("Processing : " + msg.topic)
-    if msg.topic in KeyMap.mapdict:
-        if msg.payload == "ON":
-	    msg.payload = 1
-        if msg.payload == "OFF":
-            msg.payload = 0
-        zbxKey = KeyMap.mapdict[msg.topic]
-        (zbxKey,zbxHost) =zbxKey.split("::")
-  	if zbxHost == "": 
-	    zbxHost = KEYHOST	
-        logging.info("Sending %s %s to Zabbix to host %s key %s",
-                      msg.topic,
-                      msg.payload,
-		      zbxHost,
-                      zbxKey)
-        # Zabbix can also accept text and character data...
-        # should we sanitize input or just accept it as is?
-        send_to_zabbix([Metric(zbxHost,
-                        zbxKey,
-                        msg.payload,
-                        time.strftime("%s"))],
-                        ZBXSERVER,
-                        ZBXPORT)
+    keys = topicMap.topic2keys(msg.topic)
+    for zhost, zkey, ztype, zexpr in keys:
+        #~ print(zhost, zkey, ztype)
+
+        #logging.debug("Sending %s %s to Zabbix to host %s key %s.%s",
+        #              msg.topic, msg.payload,
+        #              zbxHost, zbxKey["place"], zbxKey["key"])
+
+        value = None
+        payload = msg.payload
+
+        try:
+            if zexpr is not None:
+                jsonData = (json.loads(payload))
+                matchset = [match.value for match in zexpr.find(jsonData)]
+                #print(matchset)
+                if not matchset:
+                    continue
+                payload = matchset[0]
+
+            if ztype == 'float':
+                value = float(payload)
+
+            elif ztype == 'string':
+                if isinstance(payload, bytes):
+                    value = payload.decode('utf-8')
+                else:
+                    value = str(payload)
+
+            elif ztype == 'onoff':
+                if payload.lower() == "on":
+                    value = 1
+                if payload.lower() == "off":
+                    value = 0
+        except:
+            pass
+
+        #print("key={0} t={1} v={2}->{3} p={4}".format(zkey, ztype, payload, value, msg.payload))
+
+        if value is not None:
+            m = ZabbixMetric(zhost, zkey, value)
+            metrics.append(m)
+
+            #print(m)
+
+            res = zabbix.send(metrics)
+            if res.failed != 0:
+                logging.error("key={0} t={1} v={2}->{3} p={4}".format(zkey, ztype, payload, value, msg.payload))
+                logging.error('send_data={0}'.format(res))
+            else:
+                logging.debug('send_data={0}'.format(res))
+
     else:
         # Received something with a /raw/ topic,
         # but it didn't match anything. Log it, and discard it
-        logging.debug("Unknown: %s", msg.topic)
+        #logging.debug("Unknown: %s", msg.topic)
+        pass
 
 
 def cleanup(signum, frame):
@@ -219,6 +276,7 @@ def connect():
     logging.debug("Connecting to %s:%s", MQTT_HOST, MQTT_PORT)
     # Set the Last Will and Testament (LWT) *before* connecting
     mqttc.will_set(PRESENCETOPIC, "0", qos=0, retain=True)
+    mqttc.username_pw_set(MQTT_USER, MQTT_PASSWD)
     result = mqttc.connect(MQTT_HOST, MQTT_PORT, 60)
     if result != 0:
         logging.info("Connection failed with error code %s. Retrying", result)
@@ -236,14 +294,78 @@ def connect():
         mqttc.on_log = on_log
 
 
-class KeyMap:
-    """
-    Read the topics and keys into a dictionary for internal lookups
-    """
-    logging.debug("Loading map")
-    with open(KEYFILE, mode="r") as inputfile:
-        reader = csv.reader(inputfile)
-        mapdict = dict((rows[0], rows[1]) for rows in reader)
+class TopicMap:
+
+    def __init__(self, keyFile):
+        """
+        Read the topics and keys into a dictionary for internal lookups
+        """
+        logging.debug("Loading map")
+        self.discoveryMetrics = []
+        self.tmap = dict()
+        mergedDiscovery = {}
+
+        with open(keyFile, mode="r") as inputfile:
+            reader = csv.reader(inputfile, delimiter='|')
+            for row in reader:
+                if not row:
+                    continue
+
+                topic = row[0].strip()
+                if topic == "":
+                    continue
+
+                if row[0][0] == "#": # skip comment
+                    continue
+
+                if topic not in self.tmap:
+                    self.tmap[topic] = []
+
+                # create discovery message with host & discovery keys merged into one data list
+                host=row[1].strip()
+                discovery = row[2].strip()
+                if discovery != "x":
+                    discKey, discData = discovery.split("/")
+                    discItem = (host, discKey)
+                    if discItem not in mergedDiscovery:
+                        mergedDiscovery[discItem] = []
+                    mergedDiscovery[discItem].append(discData);
+
+                ztype = row[4].strip()
+                zexpr = None
+                if ":" in ztype:
+                    ztype, zexpr = ztype.split(":")
+                    zexpr = jspath.parse(zexpr)
+
+                self.tmap[topic].append((host, row[3].strip(), ztype, zexpr))
+
+        for discItem, discData in mergedDiscovery.items():
+            m = ZabbixMetric(discItem[0], discItem[1], '{"data":[' + ",".join(map(str,discData)) + ']}')
+            self.discoveryMetrics.append(m)
+
+        #~ print(self.tmap)
+        #~ print(self.discoveryMetrics)
+
+
+    # return list of keys matching the topic; empty list if topic not found
+    def topic2keys(self, topic):
+        if topic in self.tmap:
+            return self.tmap[topic]
+        return []
+
+    def send_discovery(self):
+        if not self.discoveryMetrics:
+          return
+        #~ print(self.discoveryMetrics)
+        try:
+            res = zabbix.send(self.discoveryMetrics)
+            logging.debug('send_discovery={0}'.format(res))
+        except:
+            logging.exception("zabbix send metrics exception:")
+
+
+
+topicMap = TopicMap(KEYFILE)
 
 # Use the signal module to handle signals
 signal.signal(signal.SIGTERM, cleanup)
@@ -254,6 +376,7 @@ connect()
 
 # Try to loop_forever until interrupted
 try:
+    daemon.notify("READY=1")
     mqttc.loop_forever()
 except KeyboardInterrupt:
     logging.info("Interrupted by keypress")
