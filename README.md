@@ -13,7 +13,7 @@ sudo apt install python3-paho-mqtt python3-jsonpath-rw
 # Install MQTT Zabbix
 ```
 mkdir /etc/mqtt-zabbix/
-git clone git://github.com/lfsousa/mqtt-zabbix.git
+git clone git://github.com/peclik/mqtt-zabbix.git
 cd mqtt-zabbix
 cp mqtt-zabbix.cfg.example /etc/mqtt-zabbix/mqtt-zabbix.cfg
 cp mqtt-zabbix.service /etc/systemd/system

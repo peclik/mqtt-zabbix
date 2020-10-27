@@ -1,13 +1,16 @@
 [global]
 DEBUG = False
 LOGFILE = /var/log/mqtt-zabbix.log
-MQTT_HOST = localhost
-MQTT_PORT = 1883
-MQTT_USER = <user>
-MQTT_PASSWD = <passwd>
-MQTT_TOPIC = house/#
-KEYFILE = /root/mqtt-zabbix/keys.csv
-KEYHOST = house
+
+KEY_FILE = /root/mqtt-zabbix/keys.csv
 ZABBIX_SERVER = localhost
 ZABBIX_PORT = 10051
 DISCOVERY_PERIOD = 300
+
+[mqtt]
+HOST = localhost
+PORT = 1883
+CLIENT = mqtt-zabbix
+USER =  <user>
+PASSWD = <passwd>
+TOPIC_SUBS = house/#
